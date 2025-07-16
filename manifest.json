@@ -1,0 +1,9 @@
+{
+	"id": "obsidian-live-html",
+	"name": "Obsidian Live HTML",
+	"version": "1.0.0",
+	"minAppVersion": "0.12.0",
+	"description": "Renders HTML code blocks with iframe for live preview.",
+	"author": "nomoresigh",
+	"isDesktopOnly": false
+}
