@@ -53,8 +53,9 @@ export default class LiveHtmlPlugin extends Plugin {
       iframe.style.borderRadius = '4px';
       iframe.style.backgroundColor = 'white';
       iframe.style.transition = 'height 0.3s ease';
-      iframe.setAttribute('scrolling', 'no'); // 스크롤 다시 비활성화
-      iframe.sandbox.add('allow-scripts', 'allow-same-origin', 'allow-popups', 'allow-forms');
+      iframe.setAttribute('scrolling', 'no');
+      // 모든 JavaScript 상호작용을 위한 완전한 sandbox 권한 부여
+      iframe.sandbox.add('allow-scripts', 'allow-same-origin', 'allow-popups', 'allow-forms', 'allow-modals', 'allow-pointer-lock', 'allow-popups-to-escape-sandbox', 'allow-presentation', 'allow-top-navigation-by-user-activation');
 
       // Generate complete HTML document
       const fullHtmlDoc = `
@@ -118,10 +119,10 @@ export default class LiveHtmlPlugin extends Plugin {
           
           <script>
             let resizeCount = 0;
-            const maxResizeAttempts = 3; // 단순하게 3번만 시도
+            const maxResizeAttempts = 5; // 시도 횟수를 늘림
             
             function sendHeight() {
-              if (resizeCount >= maxResizeAttempts) return; // 무한루프 방지만
+              if (resizeCount >= maxResizeAttempts) return;
               
               const height = document.body.scrollHeight;
               resizeCount++;
@@ -131,6 +132,36 @@ export default class LiveHtmlPlugin extends Plugin {
                 height: height
               }, '*');
             }
+            
+            // DOM 변화 감지로 페이지 전환 시에도 크기 조절
+            const observer = new MutationObserver(function(mutations) {
+              let shouldResize = false;
+              mutations.forEach(function(mutation) {
+                if (mutation.type === 'attributes' && mutation.attributeName === 'style') {
+                  const target = mutation.target;
+                  if (target.style.display !== 'none' && target.style.display !== '') {
+                    shouldResize = true;
+                  }
+                } else if (mutation.type === 'childList') {
+                  shouldResize = true;
+                }
+              });
+              
+              if (shouldResize) {
+                resizeCount = 0; // 카운터 리셋
+                setTimeout(sendHeight, 100);
+                setTimeout(sendHeight, 300);
+                setTimeout(sendHeight, 500);
+              }
+            });
+            
+            // body와 모든 자식 요소들 감시
+            observer.observe(document.body, {
+              childList: true,
+              subtree: true,
+              attributes: true,
+              attributeFilter: ['style', 'class']
+            });
             
             // 문서 로딩 완료 후 높이 전송
             if (document.readyState === 'complete') {
@@ -155,6 +186,32 @@ export default class LiveHtmlPlugin extends Plugin {
                 }
               });
             }
+            
+            // 창 크기 변경 시에도 높이 재계산
+            window.addEventListener('resize', function() {
+              resizeCount = 0;
+              setTimeout(sendHeight, 100);
+            });
+            
+            // 클릭 이벤트 발생 시에도 높이 재계산 (페이지 전환 감지)
+            document.addEventListener('click', function() {
+              setTimeout(function() {
+                resizeCount = 0;
+                sendHeight();
+              }, 50);
+              setTimeout(sendHeight, 200);
+              setTimeout(sendHeight, 500);
+            });
+            
+            // 주기적으로 높이 체크 (안전장치)
+            setInterval(function() {
+              const currentHeight = document.body.scrollHeight;
+              if (Math.abs(currentHeight - (window.lastReportedHeight || 0)) > 50) {
+                resizeCount = 0;
+                window.lastReportedHeight = currentHeight;
+                sendHeight();
+              }
+            }, 1000);
           </script>
           
           ${scripts.map(script => `<script>${script}</script>`).join('')}
