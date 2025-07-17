@@ -14,18 +14,19 @@ export default class LiveHtmlPlugin extends Plugin {
           if (iframe.contentWindow === event.source) {
             const requestedHeight = event.data.height || 0;
             const minHeight = 200; // 최소 높이
-            const maxHeight = window.innerHeight * 0.8; // 최대 높이를 화면의 80%로 제한
+            const maxHeight = window.innerHeight * 0.9; // 최대 높이를 화면의 90%로 증가
             
             // 적절한 높이 계산
-            let newHeight = Math.max(requestedHeight + 30, minHeight);
+            let newHeight = Math.max(requestedHeight + 20, minHeight); // 패딩 줄이기
             if (newHeight > maxHeight) {
               newHeight = maxHeight;
-              // 높이가 제한될 때는 스크롤 허용
               iframe.style.overflow = 'auto';
             } else {
               iframe.style.overflow = 'hidden';
             }
             
+            // 부드러운 애니메이션 추가
+            iframe.style.transition = 'height 0.2s ease-out';
             iframe.style.height = `${newHeight}px`;
             
             // 디버깅 정보
@@ -61,11 +62,12 @@ export default class LiveHtmlPlugin extends Plugin {
       const iframe = el.createEl('iframe');
       iframe.classList.add('live-html-iframe');
       iframe.style.width = '100%';
-      iframe.style.height = '400px'; // 초기 높이
+      iframe.style.height = '200px'; // 초기 높이를 더 작게 설정
       iframe.style.border = '1px solid var(--background-modifier-border)';
       iframe.style.borderRadius = '4px';
       iframe.style.backgroundColor = 'white';
       iframe.style.overflow = 'hidden';
+      iframe.style.transition = 'height 0.3s ease'; // 애니메이션 미리 설정
       iframe.sandbox.add('allow-scripts', 'allow-same-origin', 'allow-popups', 'allow-forms');
 
       // 완전한 HTML 문서 생성
@@ -84,14 +86,15 @@ export default class LiveHtmlPlugin extends Plugin {
             
             body, html {
               margin: 0 !important;
-              padding: 0 !important;
+              padding: 10px !important;
               width: 100% !important;
               height: auto !important;
-              min-height: 100vh !important;
+              min-height: auto !important;
               overflow-x: hidden !important;
               overflow-y: visible !important;
               position: static !important;
               font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+              line-height: 1.6;
             }
             
             /* 일반적인 요소들 */
@@ -139,131 +142,186 @@ export default class LiveHtmlPlugin extends Plugin {
               max-width: 100% !important;
               height: auto !important;
             }
-            
-            /* 애니메이션 성능 개선 */
-            * {
-              -webkit-transform: translateZ(0);
-              transform: translateZ(0);
-            }
           </style>
         </head>
         <body>
           ${htmlSource}
           
           <script>
-            // 범용 높이 계산 함수
-            function calculateHeight() {
-              const body = document.body;
-              const html = document.documentElement;
-              
-              // 여러 방법으로 높이 계산
-              const heights = [
-                body.scrollHeight,
-                body.offsetHeight,
-                html.clientHeight,
-                html.scrollHeight,
-                html.offsetHeight
-              ];
-              
-              // 모든 자식 요소들의 위치도 고려
-              const allElements = document.querySelectorAll('*');
-              let maxBottom = 0;
-              
-              allElements.forEach(el => {
-                const rect = el.getBoundingClientRect();
-                const bottom = rect.bottom + window.scrollY;
-                if (bottom > maxBottom) {
-                  maxBottom = bottom;
+            // 이전 높이 저장
+            let lastReportedHeight = 0;
+            let isInitialized = false;
+            
+            // 정확한 높이 계산 함수
+            function calculateContentHeight() {
+              try {
+                // 모든 콘텐츠가 로드될 때까지 대기
+                if (document.readyState !== 'complete' && !isInitialized) {
+                  return null;
                 }
-              });
-              
-              heights.push(maxBottom);
-              
-              // 가장 큰 값 사용
-              const finalHeight = Math.max(...heights.filter(h => h > 0));
-              
-              return Math.max(finalHeight, 200); // 최소 200px
+                
+                const body = document.body;
+                const html = document.documentElement;
+                
+                // 여러 방법으로 높이 계산
+                const scrollHeight = Math.max(
+                  body.scrollHeight,
+                  body.offsetHeight,
+                  html.clientHeight,
+                  html.scrollHeight,
+                  html.offsetHeight
+                );
+                
+                // body의 실제 bounding rect 확인
+                const bodyRect = body.getBoundingClientRect();
+                const bodyHeight = bodyRect.height;
+                
+                // 자식 요소들의 실제 높이 계산
+                let maxChildBottom = 0;
+                const children = Array.from(body.children);
+                
+                children.forEach(child => {
+                  if (child instanceof HTMLElement) {
+                    const rect = child.getBoundingClientRect();
+                    const style = window.getComputedStyle(child);
+                    
+                    // 숨겨진 요소는 제외
+                    if (style.display === 'none' || style.visibility === 'hidden') {
+                      return;
+                    }
+                    
+                    const marginBottom = parseFloat(style.marginBottom) || 0;
+                    const childBottom = rect.bottom - bodyRect.top + marginBottom;
+                    maxChildBottom = Math.max(maxChildBottom, childBottom);
+                  }
+                });
+                
+                // 가장 큰 값 사용하되 최소/최대 제한
+                let finalHeight = Math.max(scrollHeight, bodyHeight, maxChildBottom);
+                
+                // body padding 추가
+                const bodyStyle = window.getComputedStyle(body);
+                const paddingTop = parseFloat(bodyStyle.paddingTop) || 0;
+                const paddingBottom = parseFloat(bodyStyle.paddingBottom) || 0;
+                finalHeight += paddingTop + paddingBottom;
+                
+                // 최소 높이 보장
+                finalHeight = Math.max(finalHeight, 50);
+                
+                return Math.ceil(finalHeight);
+              } catch (error) {
+                console.warn('높이 계산 오류:', error);
+                return 200;
+              }
             }
             
             // 높이 전송 함수
+            let resizeTimeout;
             function sendHeight() {
-              try {
-                const height = calculateHeight();
-                window.parent.postMessage({
-                  type: 'resize-iframe',
-                  height: height
-                }, '*');
-              } catch (e) {
-                console.error('Height calculation error:', e);
-              }
+              clearTimeout(resizeTimeout);
+              resizeTimeout = setTimeout(() => {
+                const height = calculateContentHeight();
+                
+                if (height !== null && Math.abs(height - lastReportedHeight) > 2) {
+                  lastReportedHeight = height;
+                  
+                  window.parent.postMessage({
+                    type: 'resize-iframe',
+                    height: height
+                  }, '*');
+                  
+                  console.log('Iframe 높이 업데이트:', height + 'px');
+                }
+              }, 50);
             }
-            
-            // 이벤트 리스너 등록
-            window.addEventListener('load', sendHeight);
-            window.addEventListener('resize', sendHeight);
-            document.addEventListener('DOMContentLoaded', sendHeight);
             
             // 이미지 로딩 완료 감지
-            function setupImageListeners() {
+            function setupImageLoadListeners() {
               const images = document.querySelectorAll('img');
+              let loadedImages = 0;
+              const totalImages = images.length;
+              
+              if (totalImages === 0) {
+                sendHeight();
+                return;
+              }
+              
+              function onImageLoad() {
+                loadedImages++;
+                sendHeight();
+                
+                if (loadedImages === totalImages) {
+                  console.log('모든 이미지 로딩 완료');
+                }
+              }
+              
               images.forEach(img => {
-                if (img.complete) {
-                  sendHeight();
+                if (img.complete && img.naturalHeight !== 0) {
+                  onImageLoad();
                 } else {
-                  img.addEventListener('load', sendHeight);
-                  img.addEventListener('error', sendHeight);
+                  img.addEventListener('load', onImageLoad);
+                  img.addEventListener('error', onImageLoad);
                 }
               });
             }
             
-            // 동적 콘텐츠 변화 감지
-            function setupObservers() {
-              // ResizeObserver
-              if (window.ResizeObserver) {
-                const resizeObserver = new ResizeObserver(sendHeight);
-                resizeObserver.observe(document.body);
-                resizeObserver.observe(document.documentElement);
-              }
-              
-              // MutationObserver
-              const mutationObserver = new MutationObserver((mutations) => {
+            // DOM 변화 감지
+            function setupMutationObserver() {
+              const observer = new MutationObserver((mutations) => {
                 let shouldResize = false;
+                
                 mutations.forEach(mutation => {
-                  if (mutation.type === 'childList' || 
-                      mutation.type === 'attributes' ||
-                      mutation.type === 'characterData') {
+                  if (mutation.type === 'childList') {
                     shouldResize = true;
+                  } else if (mutation.type === 'attributes') {
+                    const target = mutation.target;
+                    if (target instanceof HTMLElement) {
+                      const affectsLayout = ['style', 'class', 'width', 'height'].includes(mutation.attributeName);
+                      if (affectsLayout) {
+                        shouldResize = true;
+                      }
+                    }
                   }
                 });
+                
                 if (shouldResize) {
-                  setTimeout(sendHeight, 100);
+                  sendHeight();
                 }
               });
               
-              mutationObserver.observe(document.body, {
+              observer.observe(document.body, {
                 childList: true,
                 subtree: true,
                 attributes: true,
-                characterData: true,
                 attributeFilter: ['style', 'class', 'width', 'height']
               });
             }
             
-            // 초기화
-            setTimeout(() => {
-              setupImageListeners();
-              setupObservers();
+            // 초기화 함수
+            function initialize() {
+              isInitialized = true;
+              setupImageLoadListeners();
+              setupMutationObserver();
+              
+              // 여러 시점에서 높이 계산
               sendHeight();
-            }, 100);
+              setTimeout(sendHeight, 100);
+              setTimeout(sendHeight, 300);
+              setTimeout(sendHeight, 500);
+            }
             
-            // 주기적 체크 (애니메이션이나 동적 변화 대응)
-            setInterval(sendHeight, 2000);
+            // 문서 상태에 따른 초기화
+            if (document.readyState === 'complete') {
+              initialize();
+            } else {
+              window.addEventListener('load', initialize);
+              document.addEventListener('DOMContentLoaded', () => {
+                setTimeout(initialize, 50);
+              });
+            }
             
-            // 여러 시점에서 높이 재계산
-            setTimeout(sendHeight, 500);
-            setTimeout(sendHeight, 1000);
-            setTimeout(sendHeight, 2000);
-            setTimeout(sendHeight, 3000);
+            // 창 크기 변경 시 높이 재계산
+            window.addEventListener('resize', sendHeight);
           </script>
           
           ${scripts.map(script => `<script>${script}</script>`).join('')}
@@ -271,9 +329,11 @@ export default class LiveHtmlPlugin extends Plugin {
           <script>
             // 사용자 스크립트 실행 후 높이 재계산
             setTimeout(() => {
-              sendHeight();
-              setupImageListeners();
-            }, 500);
+              if (typeof sendHeight === 'function') {
+                sendHeight();
+                setupImageLoadListeners();
+              }
+            }, 100);
           </script>
         </body>
         </html>
