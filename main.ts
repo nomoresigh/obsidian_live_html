@@ -13,24 +13,21 @@ export default class LiveHtmlPlugin extends Plugin {
         iframes.forEach(iframe => {
           if (iframe.contentWindow === event.source) {
             const requestedHeight = event.data.height || 0;
-            const minHeight = 200; // 최소 높이
-            const maxHeight = window.innerHeight * 0.9; // 최대 높이를 화면의 90%로 증가
+            const minHeight = 100; // Minimum height
             
-            // 적절한 높이 계산
-            let newHeight = Math.max(requestedHeight + 20, minHeight); // 패딩 줄이기
-            if (newHeight > maxHeight) {
-              newHeight = maxHeight;
-              iframe.style.overflow = 'auto';
-            } else {
-              iframe.style.overflow = 'hidden';
+            // Prevent unnecessary updates by comparing with current height
+            const currentHeight = parseInt(iframe.style.height) || 0;
+            if (Math.abs(requestedHeight - currentHeight) < 5) {
+              return; // Ignore changes less than 5px
             }
             
-            // 부드러운 애니메이션 추가
-            iframe.style.transition = 'height 0.2s ease-out';
-            iframe.style.height = `${newHeight}px`;
+            // Update only within reasonable height range (max height limit removed)
+            const newHeight = Math.max(requestedHeight, minHeight);
             
-            // 디버깅 정보
-            console.log(`Iframe resized to: ${newHeight}px (requested: ${requestedHeight}px)`);
+            iframe.style.height = `${newHeight}px`;
+            iframe.style.overflow = 'hidden'; // Always hide scrollbar
+            
+            console.log(`Iframe resized to: ${newHeight}px (requested: ${requestedHeight}px, current: ${currentHeight}px)`);
           }
         });
       }
@@ -44,33 +41,33 @@ export default class LiveHtmlPlugin extends Plugin {
 
     this.registerMarkdownCodeBlockProcessor('html-live', (source, el, ctx) => {
       
-      // 스크립트 추출
+      // Extract scripts
       const scripts: string[] = [];
       let htmlSource = source;
       
-      // 모든 script 태그 추출
+      // Extract all script tags
       const scriptRegex = /<script[^>]*>([\s\S]*?)<\/script>/gi;
       let match;
       while ((match = scriptRegex.exec(source)) !== null) {
         scripts.push(match[1] || '');
       }
       
-      // script 태그 제거
+      // Remove script tags
       htmlSource = source.replace(scriptRegex, '');
 
-      // iframe 생성
+      // Create iframe
       const iframe = el.createEl('iframe');
       iframe.classList.add('live-html-iframe');
       iframe.style.width = '100%';
-      iframe.style.height = '200px'; // 초기 높이를 더 작게 설정
+      iframe.style.height = '200px'; // Set initial height smaller
       iframe.style.border = '1px solid var(--background-modifier-border)';
       iframe.style.borderRadius = '4px';
       iframe.style.backgroundColor = 'white';
       iframe.style.overflow = 'hidden';
-      iframe.style.transition = 'height 0.3s ease'; // 애니메이션 미리 설정
+      iframe.style.transition = 'height 0.3s ease'; // Set animation in advance
       iframe.sandbox.add('allow-scripts', 'allow-same-origin', 'allow-popups', 'allow-forms');
 
-      // 완전한 HTML 문서 생성
+      // Generate complete HTML document
       const fullHtmlDoc = `
         <!DOCTYPE html>
         <html lang="ko">
@@ -148,81 +145,46 @@ export default class LiveHtmlPlugin extends Plugin {
           ${htmlSource}
           
           <script>
-            // 이전 높이 저장
+            // Previous height storage
             let lastReportedHeight = 0;
             let isInitialized = false;
+            let resizeCount = 0;
+            const maxResizeAttempts = 10; // Maximum resize attempts
             
-            // 정확한 높이 계산 함수
+            // Accurate height calculation function
             function calculateContentHeight() {
               try {
-                // 모든 콘텐츠가 로드될 때까지 대기
-                if (document.readyState !== 'complete' && !isInitialized) {
-                  return null;
+                // Prevent infinite loop
+                if (resizeCount > maxResizeAttempts) {
+                  console.warn('Maximum resize attempts exceeded, stopping resize');
+                  return lastReportedHeight || 200;
                 }
                 
                 const body = document.body;
-                const html = document.documentElement;
                 
-                // 여러 방법으로 높이 계산
-                const scrollHeight = Math.max(
-                  body.scrollHeight,
-                  body.offsetHeight,
-                  html.clientHeight,
-                  html.scrollHeight,
-                  html.offsetHeight
-                );
+                // Simple and safe height calculation (no max height limit)
+                const contentHeight = body.scrollHeight;
+                const minHeight = 100;
                 
-                // body의 실제 bounding rect 확인
-                const bodyRect = body.getBoundingClientRect();
-                const bodyHeight = bodyRect.height;
-                
-                // 자식 요소들의 실제 높이 계산
-                let maxChildBottom = 0;
-                const children = Array.from(body.children);
-                
-                children.forEach(child => {
-                  if (child instanceof HTMLElement) {
-                    const rect = child.getBoundingClientRect();
-                    const style = window.getComputedStyle(child);
-                    
-                    // 숨겨진 요소는 제외
-                    if (style.display === 'none' || style.visibility === 'hidden') {
-                      return;
-                    }
-                    
-                    const marginBottom = parseFloat(style.marginBottom) || 0;
-                    const childBottom = rect.bottom - bodyRect.top + marginBottom;
-                    maxChildBottom = Math.max(maxChildBottom, childBottom);
-                  }
-                });
-                
-                // 가장 큰 값 사용하되 최소/최대 제한
-                let finalHeight = Math.max(scrollHeight, bodyHeight, maxChildBottom);
-                
-                // body padding 추가
-                const bodyStyle = window.getComputedStyle(body);
-                const paddingTop = parseFloat(bodyStyle.paddingTop) || 0;
-                const paddingBottom = parseFloat(bodyStyle.paddingBottom) || 0;
-                finalHeight += paddingTop + paddingBottom;
-                
-                // 최소 높이 보장
-                finalHeight = Math.max(finalHeight, 50);
+                let finalHeight = Math.max(contentHeight, minHeight);
                 
                 return Math.ceil(finalHeight);
               } catch (error) {
-                console.warn('높이 계산 오류:', error);
-                return 200;
+                console.warn('Height calculation error:', error);
+                return lastReportedHeight || 200;
               }
             }
             
-            // 높이 전송 함수
+            // Height sending function
             let resizeTimeout;
             function sendHeight() {
               clearTimeout(resizeTimeout);
               resizeTimeout = setTimeout(() => {
                 const height = calculateContentHeight();
                 
-                if (height !== null && Math.abs(height - lastReportedHeight) > 2) {
+                // Update only if height changed significantly (no max height limit)
+                if (height && Math.abs(height - lastReportedHeight) > 10) {
+                  resizeCount++;
                   lastReportedHeight = height;
                   
                   window.parent.postMessage({
@@ -230,33 +192,30 @@ export default class LiveHtmlPlugin extends Plugin {
                     height: height
                   }, '*');
                   
-                  console.log('Iframe 높이 업데이트:', height + 'px');
+                  console.log('Iframe height updated: ' + height + 'px (attempt: ' + resizeCount + ')');
                 }
-              }, 50);
+              }, 100);
             }
             
-            // 이미지 로딩 완료 감지
+            // Image loading completion detection
             function setupImageLoadListeners() {
               const images = document.querySelectorAll('img');
-              let loadedImages = 0;
-              const totalImages = images.length;
               
-              if (totalImages === 0) {
-                sendHeight();
+              if (images.length === 0) {
+                setTimeout(sendHeight, 100);
                 return;
               }
               
+              let loadedImages = 0;
               function onImageLoad() {
                 loadedImages++;
-                sendHeight();
-                
-                if (loadedImages === totalImages) {
-                  console.log('모든 이미지 로딩 완료');
+                if (loadedImages === images.length) {
+                  setTimeout(sendHeight, 200);
                 }
               }
               
               images.forEach(img => {
-                if (img.complete && img.naturalHeight !== 0) {
+                if (img.complete) {
                   onImageLoad();
                 } else {
                   img.addEventListener('load', onImageLoad);
@@ -265,69 +224,29 @@ export default class LiveHtmlPlugin extends Plugin {
               });
             }
             
-            // DOM 변화 감지
-            function setupMutationObserver() {
-              const observer = new MutationObserver((mutations) => {
-                let shouldResize = false;
-                
-                mutations.forEach(mutation => {
-                  if (mutation.type === 'childList') {
-                    shouldResize = true;
-                  } else if (mutation.type === 'attributes') {
-                    const target = mutation.target;
-                    if (target instanceof HTMLElement) {
-                      const affectsLayout = ['style', 'class', 'width', 'height'].includes(mutation.attributeName);
-                      if (affectsLayout) {
-                        shouldResize = true;
-                      }
-                    }
-                  }
-                });
-                
-                if (shouldResize) {
-                  sendHeight();
-                }
-              });
-              
-              observer.observe(document.body, {
-                childList: true,
-                subtree: true,
-                attributes: true,
-                attributeFilter: ['style', 'class', 'width', 'height']
-              });
-            }
-            
-            // 초기화 함수
+            // Initialization function
             function initialize() {
+              if (isInitialized) return;
               isInitialized = true;
-              setupImageLoadListeners();
-              setupMutationObserver();
               
-              // 여러 시점에서 높이 계산
-              sendHeight();
-              setTimeout(sendHeight, 100);
-              setTimeout(sendHeight, 300);
-              setTimeout(sendHeight, 500);
+              setupImageLoadListeners();
+              
+              // Set initial height (only once)
+              setTimeout(sendHeight, 200);
             }
             
-            // 문서 상태에 따른 초기화
+            // Initialize after document loading complete
             if (document.readyState === 'complete') {
               initialize();
             } else {
               window.addEventListener('load', initialize);
-              document.addEventListener('DOMContentLoaded', () => {
-                setTimeout(initialize, 50);
-              });
             }
-            
-            // 창 크기 변경 시 높이 재계산
-            window.addEventListener('resize', sendHeight);
           </script>
           
           ${scripts.map(script => `<script>${script}</script>`).join('')}
           
           <script>
-            // 사용자 스크립트 실행 후 높이 재계산
+            // Recalculate height after user scripts execution
             setTimeout(() => {
               if (typeof sendHeight === 'function') {
                 sendHeight();
