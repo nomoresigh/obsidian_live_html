@@ -13,10 +13,7 @@ export default class LiveHtmlPlugin extends Plugin {
         iframes.forEach(iframe => {
           if (iframe.contentWindow === event.source) {
             const requestedHeight = event.data.height || 0;
-            
-            // 요청된 높이로 설정하되 overflow는 제거
             iframe.style.height = `${requestedHeight}px`;
-            // iframe.style.overflow = 'hidden'; // 이 줄을 제거해서 콘텐츠가 잘리지 않게 함
           }
         });
       }
@@ -44,8 +41,14 @@ export default class LiveHtmlPlugin extends Plugin {
       // Remove script tags
       htmlSource = source.replace(scriptRegex, '');
 
+      // Create iframe container for better isolation
+      const container = el.createEl('div');
+      container.style.position = 'relative';
+      container.style.isolation = 'isolate'; // CSS isolation for stacking context
+      container.style.zIndex = '1'; // Lower than Obsidian UI
+
       // Create iframe
-      const iframe = el.createEl('iframe');
+      const iframe = container.createEl('iframe');
       iframe.classList.add('live-html-iframe');
       iframe.style.width = '100%';
       iframe.style.height = '200px';
@@ -53,9 +56,11 @@ export default class LiveHtmlPlugin extends Plugin {
       iframe.style.borderRadius = '4px';
       iframe.style.backgroundColor = 'white';
       iframe.style.transition = 'height 0.3s ease';
+      iframe.style.pointerEvents = 'auto'; // iframe 내부에서만 이벤트 허용
       iframe.setAttribute('scrolling', 'no');
-      // 모든 JavaScript 상호작용을 위한 완전한 sandbox 권한 부여
-      iframe.sandbox.add('allow-scripts', 'allow-same-origin', 'allow-popups', 'allow-forms', 'allow-modals', 'allow-pointer-lock', 'allow-popups-to-escape-sandbox', 'allow-presentation', 'allow-top-navigation-by-user-activation');
+      
+      // 더 제한적인 sandbox 설정 - allow-modals 제거하여 alert/confirm 차단
+      iframe.sandbox.add('allow-scripts', 'allow-same-origin', 'allow-popups-to-escape-sandbox', 'allow-forms');
 
       // Generate complete HTML document
       const fullHtmlDoc = `
@@ -78,6 +83,9 @@ export default class LiveHtmlPlugin extends Plugin {
               height: auto;
               font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
               line-height: 1.6;
+              /* iframe 내부에서 모든 요소가 격리되도록 */
+              position: relative;
+              z-index: 1;
             }
             
             /* 스크롤바만 숨김 */
@@ -89,6 +97,22 @@ export default class LiveHtmlPlugin extends Plugin {
             body {
               scrollbar-width: none; /* Firefox */
               -ms-overflow-style: none; /* IE/Edge */
+              min-height: auto !important;
+            }
+            
+            html {
+              min-height: auto !important;
+            }
+            
+            /* 모든 팝업/모달 요소가 iframe 내부에만 표시되도록 강제 */
+            .modal, .popup, .overlay, .tooltip, 
+            [class*="modal"], [class*="popup"], [class*="overlay"], [class*="tooltip"],
+            [id*="modal"], [id*="popup"], [id*="overlay"], [id*="tooltip"] {
+              max-width: 100% !important;
+              max-height: 80vh !important;
+              overflow: auto !important;
+              /* iframe 경계를 벗어나지 않도록만 제한 */
+              contain: layout !important;
             }
             
             /* 이미지 반응형 */
@@ -112,50 +136,209 @@ export default class LiveHtmlPlugin extends Plugin {
             input, textarea, select, button {
               max-width: 100%;
             }
+            
+            /* 뷰포트 단위 차단 */
+            .container {
+              min-height: auto !important;
+            }
+            
+            /* sticky position 차단 */
+            header {
+              position: relative !important;
+              top: auto !important;
+            }
+            
+            /* 백드롭 필터 제거 */
+            * {
+              backdrop-filter: none !important;
+              -webkit-backdrop-filter: none !important;
+            }
           </style>
         </head>
         <body>
           ${htmlSource}
           
           <script>
-            let resizeCount = 0;
-            const maxResizeAttempts = 5; // 시도 횟수를 늘림
+            // 디바운싱을 위한 변수들
+            let resizeTimeout;
+            let lastReportedHeight = 0;
+            let isProcessing = false;
             
-            function sendHeight() {
-              if (resizeCount >= maxResizeAttempts) return;
-              
-              const height = document.body.scrollHeight;
-              resizeCount++;
-              
-              window.parent.postMessage({
-                type: 'resize-iframe',
-                height: height
-              }, '*');
+            // 이벤트 전파 차단 함수
+            function stopPropagationToParent(event) {
+              if (event) {
+                event.stopPropagation();
+                event.stopImmediatePropagation();
+              }
             }
             
-            // DOM 변화 감지로 페이지 전환 시에도 크기 조절
+            // 모든 키보드 이벤트가 iframe 내부에서만 처리되도록
+            document.addEventListener('keydown', stopPropagationToParent, true);
+            document.addEventListener('keyup', stopPropagationToParent, true);
+            document.addEventListener('keypress', stopPropagationToParent, true);
+            
+            // 팝업/모달 관련 이벤트들도 격리
+            document.addEventListener('focus', stopPropagationToParent, true);
+            document.addEventListener('blur', stopPropagationToParent, true);
+            
+            // 브라우저 네이티브 팝업만 차단 (웹 UI는 그대로 유지)
+            const originalAlert = window.alert;
+            const originalConfirm = window.confirm;
+            const originalPrompt = window.prompt;
+            
+            window.alert = function(message) {
+              // 브라우저 네이티브 alert만 console.log로 처리
+              console.log('Alert:', message);
+              return;
+            };
+            
+            window.confirm = function(message) {
+              // 브라우저 네이티브 confirm만 auto-confirm
+              console.log('Confirm:', message, '-> Auto confirmed');
+              return true;
+            };
+            
+            window.prompt = function(message, defaultValue) {
+              // 브라우저 네이티브 prompt만 기본값 반환
+              console.log('Prompt:', message, '-> Default value:', defaultValue);
+              return defaultValue || '';
+            };
+
+            // 디바운싱된 높이 전송 함수
+            function sendHeightDebounced(delay = 100) {
+              if (isProcessing) return;
+              
+              clearTimeout(resizeTimeout);
+              resizeTimeout = setTimeout(() => {
+                sendHeight();
+              }, delay);
+            }
+            
+            function sendHeight() {
+              if (isProcessing) return;
+              isProcessing = true;
+              
+              try {
+                // 단순하게 scrollHeight만 사용 - 팝업 제외 로직 제거
+                const currentHeight = document.body.scrollHeight;
+                
+                // 높이 변화가 최소 5px 이상일 때만 전송
+                if (Math.abs(currentHeight - lastReportedHeight) >= 5) {
+                  lastReportedHeight = currentHeight;
+                  
+                  window.parent.postMessage({
+                    type: 'resize-iframe',
+                    height: currentHeight
+                  }, '*');
+                }
+              } catch (error) {
+                console.warn('Height calculation error:', error);
+              } finally {
+                // 짧은 딜레이 후 다시 처리 가능하도록
+                setTimeout(() => {
+                  isProcessing = false;
+                }, 50);
+              }
+            }
+            
+            // 뷰포트 단위 제거 함수 (최적화됨)
+            function removeViewportUnits() {
+              const elementsWithStyle = document.querySelectorAll('[style*="vh"], [style*="vw"]');
+              
+              elementsWithStyle.forEach(element => {
+                const styleAttr = element.getAttribute('style');
+                if (!styleAttr) return;
+                
+                const viewportPatterns = [
+                  { pattern: /min-height\s*:\s*[0-9.]+vh[^;]*/gi, replacement: 'min-height: auto' },
+                  { pattern: /height\s*:\s*[0-9.]+vh[^;]*/gi, replacement: 'height: auto' },
+                  { pattern: /max-height\s*:\s*[0-9.]+vh[^;]*/gi, replacement: 'max-height: none' },
+                  { pattern: /min-height\s*:\s*calc\([^)]*vh[^)]*\)[^;]*/gi, replacement: 'min-height: auto' },
+                  { pattern: /height\s*:\s*calc\([^)]*vh[^)]*\)[^;]*/gi, replacement: 'height: auto' },
+                  { pattern: /max-height\s*:\s*calc\([^)]*vh[^)]*\)[^;]*/gi, replacement: 'max-height: none' }
+                ];
+                
+                let newStyle = styleAttr;
+                let modified = false;
+                
+                viewportPatterns.forEach(({pattern, replacement}) => {
+                  if (pattern.test(newStyle)) {
+                    newStyle = newStyle.replace(pattern, replacement);
+                    modified = true;
+                  }
+                });
+                
+                if (modified) {
+                  element.setAttribute('style', newStyle);
+                }
+              });
+            }
+
+            // 초기 뷰포트 단위 제거
+            removeViewportUnits();
+            
+            // DOM 변경 감지 (최적화됨)
+            let mutationTimeout;
             const observer = new MutationObserver(function(mutations) {
               let shouldResize = false;
+              let shouldRemoveViewport = false;
+              
               mutations.forEach(function(mutation) {
-                if (mutation.type === 'attributes' && mutation.attributeName === 'style') {
-                  const target = mutation.target;
-                  if (target.style.display !== 'none' && target.style.display !== '') {
-                    shouldResize = true;
-                  }
-                } else if (mutation.type === 'childList') {
+                if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
                   shouldResize = true;
+                  shouldRemoveViewport = true;
+                  
+                  // position: fixed 강제 변경 제거 - 일반 웹 UI 그대로 유지
+                  /*
+                  mutation.addedNodes.forEach(node => {
+                    if (node.nodeType === 1) { // Element node
+                      const element = node;
+                      if (element.style && element.style.position === 'fixed') {
+                        element.style.position = 'absolute';
+                      }
+                      // 자식 요소들도 확인
+                      const fixedElements = element.querySelectorAll ? element.querySelectorAll('[style*="position: fixed"], [style*="position:fixed"]') : [];
+                      fixedElements.forEach(fixed => {
+                        fixed.style.position = 'absolute';
+                      });
+                    }
+                  });
+                  */
+                } else if (mutation.type === 'attributes') {
+                  if (mutation.attributeName === 'style') {
+                    const target = mutation.target;
+                    const style = target.getAttribute('style') || '';
+                    
+                    // position: fixed 감지 및 변경 제거
+                    /*
+                    if (style.includes('position: fixed') || style.includes('position:fixed')) {
+                      target.style.position = 'absolute';
+                    }
+                    */
+                    
+                    if (style.includes('vh') || style.includes('vw')) {
+                      shouldRemoveViewport = true;
+                    }
+                    
+                    if (style.includes('display') || style.includes('height') || style.includes('visibility')) {
+                      shouldResize = true;
+                    }
+                  }
                 }
               });
               
+              // 뷰포트 단위 제거 (디바운싱)
+              if (shouldRemoveViewport) {
+                clearTimeout(mutationTimeout);
+                mutationTimeout = setTimeout(removeViewportUnits, 50);
+              }
+              
+              // 크기 조정 (디바운싱)
               if (shouldResize) {
-                resizeCount = 0; // 카운터 리셋
-                setTimeout(sendHeight, 100);
-                setTimeout(sendHeight, 300);
-                setTimeout(sendHeight, 500);
+                sendHeightDebounced(100);
               }
             });
             
-            // body와 모든 자식 요소들 감시
             observer.observe(document.body, {
               childList: true,
               subtree: true,
@@ -165,60 +348,74 @@ export default class LiveHtmlPlugin extends Plugin {
             
             // 문서 로딩 완료 후 높이 전송
             if (document.readyState === 'complete') {
-              sendHeight();
+              sendHeightDebounced(100);
             } else {
-              window.addEventListener('load', sendHeight);
+              window.addEventListener('load', () => sendHeightDebounced(200));
             }
             
-            // 이미지 로딩 완료 시 한 번 더
+            // 이미지 로딩 완료 감지
             const images = document.querySelectorAll('img');
             if (images.length > 0) {
               let loadedCount = 0;
+              const imageLoadHandler = () => {
+                loadedCount++;
+                if (loadedCount === images.length) {
+                  sendHeightDebounced(300);
+                }
+              };
+              
               images.forEach(img => {
                 if (img.complete) {
-                  loadedCount++;
-                  if (loadedCount === images.length) sendHeight();
+                  imageLoadHandler();
                 } else {
-                  img.addEventListener('load', () => {
-                    loadedCount++;
-                    if (loadedCount === images.length) sendHeight();
-                  });
+                  img.addEventListener('load', imageLoadHandler, { once: true });
+                  img.addEventListener('error', imageLoadHandler, { once: true });
                 }
               });
             }
             
-            // 창 크기 변경 시에도 높이 재계산
-            window.addEventListener('resize', function() {
-              resizeCount = 0;
-              setTimeout(sendHeight, 100);
+            // 창 크기 변경 시 높이 재계산
+            window.addEventListener('resize', () => sendHeightDebounced(200));
+            
+            // 클릭 이벤트 (페이지 전환 감지용, 최적화됨)
+            document.addEventListener('click', (e) => {
+              stopPropagationToParent(e);
+              sendHeightDebounced(300);
             });
             
-            // 클릭 이벤트 발생 시에도 높이 재계산 (페이지 전환 감지)
-            document.addEventListener('click', function() {
-              setTimeout(function() {
-                resizeCount = 0;
-                sendHeight();
-              }, 50);
-              setTimeout(sendHeight, 200);
-              setTimeout(sendHeight, 500);
-            });
-            
-            // 주기적으로 높이 체크 (안전장치)
-            setInterval(function() {
-              const currentHeight = document.body.scrollHeight;
-              if (Math.abs(currentHeight - (window.lastReportedHeight || 0)) > 50) {
-                resizeCount = 0;
-                window.lastReportedHeight = currentHeight;
-                sendHeight();
+            // 주기적 높이 체크 (안전장치, 빈도 감소)
+            setInterval(() => {
+              if (!isProcessing) {
+                const currentHeight = document.body.scrollHeight;
+                if (Math.abs(currentHeight - lastReportedHeight) > 20) {
+                  sendHeightDebounced(100);
+                }
               }
-            }, 1000);
+            }, 2000); // 2초로 증가
+            
+            // 정리 함수들
+            window.addEventListener('beforeunload', () => {
+              clearTimeout(resizeTimeout);
+              clearTimeout(mutationTimeout);
+              observer.disconnect();
+            });
           </script>
           
           ${scripts.map(script => `<script>${script}</script>`).join('')}
           
           <script>
-            // User scripts execution
-            setTimeout(sendHeight, 100);
+            // 사용자 스크립트 실행 후 높이 재조정
+            setTimeout(() => sendHeightDebounced(500), 100);
+            
+            // position: fixed 강제 변경 제거 - 일반 웹 UI 그대로 유지
+            /*
+            setTimeout(() => {
+              const fixedElements = document.querySelectorAll('[style*="position: fixed"], [style*="position:fixed"]');
+              fixedElements.forEach(element => {
+                element.style.position = 'absolute';
+              });
+            }, 200);
+            */
           </script>
         </body>
         </html>
