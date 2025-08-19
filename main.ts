@@ -71,7 +71,7 @@ export default class LiveHtmlPlugin extends Plugin {
           <meta name="viewport" content="width=device-width, initial-scale=1.0">
           <title>Live Preview</title>
           <style>
-            /* 기본 설정만 */
+            /* 기본 설정 */
             * {
               box-sizing: border-box;
             }
@@ -83,9 +83,24 @@ export default class LiveHtmlPlugin extends Plugin {
               height: auto;
               font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
               line-height: 1.6;
-              /* iframe 내부에서 모든 요소가 격리되도록 */
               position: relative;
-              z-index: 1;
+              /* 뷰포트 단위 강제 차단 */
+              --vh: 1px !important;
+              --vw: 1px !important;
+              --vmin: 1px !important;
+              --vmax: 1px !important;
+            }
+            
+            /* 뷰포트 단위를 사용하는 모든 요소를 안전한 값으로 오버라이드 */
+            [style*="vh"], [style*="vw"], [style*="vmin"], [style*="vmax"] {
+              min-height: auto !important;
+              height: auto !important;
+              max-height: none !important;
+            }
+            
+            /* 일반적인 컨테이너들도 뷰포트 높이 사용 방지 */
+            .container, div, section, main, article {
+              min-height: auto !important;
             }
             
             /* 스크롤바만 숨김 */
@@ -104,14 +119,13 @@ export default class LiveHtmlPlugin extends Plugin {
               min-height: auto !important;
             }
             
-            /* 모든 팝업/모달 요소가 iframe 내부에만 표시되도록 강제 */
+            /* 팝업/모달 요소가 iframe 내부에만 표시되도록 */
             .modal, .popup, .overlay, .tooltip, 
             [class*="modal"], [class*="popup"], [class*="overlay"], [class*="tooltip"],
             [id*="modal"], [id*="popup"], [id*="overlay"], [id*="tooltip"] {
               max-width: 100% !important;
               max-height: 80vh !important;
               overflow: auto !important;
-              /* iframe 경계를 벗어나지 않도록만 제한 */
               contain: layout !important;
             }
             
@@ -135,23 +149,6 @@ export default class LiveHtmlPlugin extends Plugin {
             /* 폼 요소 */
             input, textarea, select, button {
               max-width: 100%;
-            }
-            
-            /* 뷰포트 단위 차단 */
-            .container {
-              min-height: auto !important;
-            }
-            
-            /* sticky position 차단 */
-            header {
-              position: relative !important;
-              top: auto !important;
-            }
-            
-            /* 백드롭 필터 제거 */
-            * {
-              backdrop-filter: none !important;
-              -webkit-backdrop-filter: none !important;
             }
           </style>
         </head>
@@ -182,27 +179,73 @@ export default class LiveHtmlPlugin extends Plugin {
             document.addEventListener('blur', stopPropagationToParent, true);
             
             // 브라우저 네이티브 팝업만 차단 (웹 UI는 그대로 유지)
-            const originalAlert = window.alert;
-            const originalConfirm = window.confirm;
-            const originalPrompt = window.prompt;
-            
             window.alert = function(message) {
-              // 브라우저 네이티브 alert만 console.log로 처리
               console.log('Alert:', message);
               return;
             };
             
             window.confirm = function(message) {
-              // 브라우저 네이티브 confirm만 auto-confirm
               console.log('Confirm:', message, '-> Auto confirmed');
               return true;
             };
             
             window.prompt = function(message, defaultValue) {
-              // 브라우저 네이티브 prompt만 기본값 반환
               console.log('Prompt:', message, '-> Default value:', defaultValue);
               return defaultValue || '';
             };
+
+            // === 뷰포트 단위 완전 제거 함수 ===
+            function removeViewportUnits() {
+              try {
+                // 인라인 스타일에서 뷰포트 단위 제거
+                const elementsWithVh = document.querySelectorAll('[style*="vh"], [style*="vw"], [style*="vmin"], [style*="vmax"]');
+                
+                elementsWithVh.forEach(element => {
+                  const style = element.getAttribute('style');
+                  if (!style) return;
+                  
+                  let newStyle = style
+                    // 높이 관련 뷰포트 단위를 auto로 변경
+                    .replace(/min-height\s*:\s*[0-9.]+v[hwminax]+\s*[^;]*/gi, 'min-height: auto')
+                    .replace(/height\s*:\s*[0-9.]+v[hwminax]+\s*[^;]*/gi, 'height: auto')
+                    .replace(/max-height\s*:\s*[0-9.]+v[hwminax]+\s*[^;]*/gi, 'max-height: none')
+                    // calc 함수 내 뷰포트 단위도 처리
+                    .replace(/min-height\s*:\s*calc\([^)]*v[hwminax]+[^)]*\)[^;]*/gi, 'min-height: auto')
+                    .replace(/height\s*:\s*calc\([^)]*v[hwminax]+[^)]*\)[^;]*/gi, 'height: auto')
+                    .replace(/max-height\s*:\s*calc\([^)]*v[hwminax]+[^)]*\)[^;]*/gi, 'max-height: none');
+                  
+                  if (newStyle !== style) {
+                    element.setAttribute('style', newStyle);
+                    console.log('뷰포트 단위 제거됨:', element.tagName);
+                  }
+                });
+                
+                // CSS 규칙에서 뷰포트 단위 제거
+                try {
+                  Array.from(document.styleSheets).forEach(sheet => {
+                    try {
+                      Array.from(sheet.cssRules || []).forEach(rule => {
+                        if (rule.style) {
+                          ['height', 'min-height', 'max-height'].forEach(prop => {
+                            const value = rule.style.getPropertyValue(prop);
+                            if (value && /v[hwminax]+/.test(value)) {
+                              rule.style.setProperty(prop, 'auto', 'important');
+                            }
+                          });
+                        }
+                      });
+                    } catch (e) {
+                      // CORS 등으로 접근 불가능한 스타일시트는 무시
+                    }
+                  });
+                } catch (e) {
+                  console.warn('CSS 규칙 처리 중 오류:', e);
+                }
+                
+              } catch (error) {
+                console.warn('뷰포트 단위 제거 중 오류:', error);
+              }
+            }
 
             // 디바운싱된 높이 전송 함수
             function sendHeightDebounced(delay = 100) {
@@ -219,7 +262,6 @@ export default class LiveHtmlPlugin extends Plugin {
               isProcessing = true;
               
               try {
-                // 단순하게 scrollHeight만 사용 - 팝업 제외 로직 제거
                 const currentHeight = document.body.scrollHeight;
                 
                 // 높이 변화가 최소 5px 이상일 때만 전송
@@ -241,43 +283,10 @@ export default class LiveHtmlPlugin extends Plugin {
               }
             }
             
-            // 뷰포트 단위 제거 함수 (최적화됨)
-            function removeViewportUnits() {
-              const elementsWithStyle = document.querySelectorAll('[style*="vh"], [style*="vw"]');
-              
-              elementsWithStyle.forEach(element => {
-                const styleAttr = element.getAttribute('style');
-                if (!styleAttr) return;
-                
-                const viewportPatterns = [
-                  { pattern: /min-height\s*:\s*[0-9.]+vh[^;]*/gi, replacement: 'min-height: auto' },
-                  { pattern: /height\s*:\s*[0-9.]+vh[^;]*/gi, replacement: 'height: auto' },
-                  { pattern: /max-height\s*:\s*[0-9.]+vh[^;]*/gi, replacement: 'max-height: none' },
-                  { pattern: /min-height\s*:\s*calc\([^)]*vh[^)]*\)[^;]*/gi, replacement: 'min-height: auto' },
-                  { pattern: /height\s*:\s*calc\([^)]*vh[^)]*\)[^;]*/gi, replacement: 'height: auto' },
-                  { pattern: /max-height\s*:\s*calc\([^)]*vh[^)]*\)[^;]*/gi, replacement: 'max-height: none' }
-                ];
-                
-                let newStyle = styleAttr;
-                let modified = false;
-                
-                viewportPatterns.forEach(({pattern, replacement}) => {
-                  if (pattern.test(newStyle)) {
-                    newStyle = newStyle.replace(pattern, replacement);
-                    modified = true;
-                  }
-                });
-                
-                if (modified) {
-                  element.setAttribute('style', newStyle);
-                }
-              });
-            }
-
             // 초기 뷰포트 단위 제거
             removeViewportUnits();
             
-            // DOM 변경 감지 (최적화됨)
+            // DOM 변경 감지
             let mutationTimeout;
             const observer = new MutationObserver(function(mutations) {
               let shouldResize = false;
@@ -287,34 +296,10 @@ export default class LiveHtmlPlugin extends Plugin {
                 if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
                   shouldResize = true;
                   shouldRemoveViewport = true;
-                  
-                  // position: fixed 강제 변경 제거 - 일반 웹 UI 그대로 유지
-                  /*
-                  mutation.addedNodes.forEach(node => {
-                    if (node.nodeType === 1) { // Element node
-                      const element = node;
-                      if (element.style && element.style.position === 'fixed') {
-                        element.style.position = 'absolute';
-                      }
-                      // 자식 요소들도 확인
-                      const fixedElements = element.querySelectorAll ? element.querySelectorAll('[style*="position: fixed"], [style*="position:fixed"]') : [];
-                      fixedElements.forEach(fixed => {
-                        fixed.style.position = 'absolute';
-                      });
-                    }
-                  });
-                  */
                 } else if (mutation.type === 'attributes') {
                   if (mutation.attributeName === 'style') {
                     const target = mutation.target;
                     const style = target.getAttribute('style') || '';
-                    
-                    // position: fixed 감지 및 변경 제거
-                    /*
-                    if (style.includes('position: fixed') || style.includes('position:fixed')) {
-                      target.style.position = 'absolute';
-                    }
-                    */
                     
                     if (style.includes('vh') || style.includes('vw')) {
                       shouldRemoveViewport = true;
@@ -377,13 +362,13 @@ export default class LiveHtmlPlugin extends Plugin {
             // 창 크기 변경 시 높이 재계산
             window.addEventListener('resize', () => sendHeightDebounced(200));
             
-            // 클릭 이벤트 (페이지 전환 감지용, 최적화됨)
+            // 클릭 이벤트 (페이지 전환 감지용)
             document.addEventListener('click', (e) => {
               stopPropagationToParent(e);
               sendHeightDebounced(300);
             });
             
-            // 주기적 높이 체크 (안전장치, 빈도 감소)
+            // 주기적 높이 체크 (안전장치)
             setInterval(() => {
               if (!isProcessing) {
                 const currentHeight = document.body.scrollHeight;
@@ -391,7 +376,7 @@ export default class LiveHtmlPlugin extends Plugin {
                   sendHeightDebounced(100);
                 }
               }
-            }, 2000); // 2초로 증가
+            }, 2000);
             
             // 정리 함수들
             window.addEventListener('beforeunload', () => {
@@ -404,18 +389,13 @@ export default class LiveHtmlPlugin extends Plugin {
           ${scripts.map(script => `<script>${script}</script>`).join('')}
           
           <script>
-            // 사용자 스크립트 실행 후 높이 재조정
-            setTimeout(() => sendHeightDebounced(500), 100);
-            
-            // position: fixed 강제 변경 제거 - 일반 웹 UI 그대로 유지
-            /*
+            // 사용자 스크립트 실행 후 뷰포트 단위 최종 정리
             setTimeout(() => {
-              const fixedElements = document.querySelectorAll('[style*="position: fixed"], [style*="position:fixed"]');
-              fixedElements.forEach(element => {
-                element.style.position = 'absolute';
-              });
-            }, 200);
-            */
+              if (typeof removeViewportUnits === 'function') {
+                removeViewportUnits();
+                sendHeightDebounced(500);
+              }
+            }, 100);
           </script>
         </body>
         </html>
